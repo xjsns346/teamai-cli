@@ -117,6 +117,77 @@ describe('NpmAdapter', () => {
     );
   });
 
+  it('targets the workspace root when installing from a pnpm workspace root', async () => {
+    fs.writeFileSync(path.join(dir, 'package.json'), '{}');
+    fs.writeFileSync(path.join(dir, 'pnpm-workspace.yaml'), 'packages:\n  - packages/*\n');
+    const execute = vi.fn<CommandExecutor>().mockResolvedValue({
+      code: 0,
+      stdout: '[]',
+      stderr: '',
+    });
+
+    await new NpmAdapter(execute).install(
+      [{ name: 'is-odd', version: '*' }],
+      { cwd: dir, scope: 'project' },
+    );
+
+    expect(execute).toHaveBeenCalledWith(
+      'pnpm',
+      ['add', '--workspace-root', 'is-odd'],
+      expect.objectContaining({ cwd: dir }),
+    );
+  });
+
+  it('detects pnpm from a workspace ancestor for member installs', async () => {
+    const member = path.join(dir, 'packages', 'app');
+    fs.mkdirSync(member, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
+      packageManager: 'pnpm@10.20.0',
+    }));
+    fs.writeFileSync(path.join(dir, 'pnpm-workspace.yaml'), 'packages:\n  - packages/*\n');
+    fs.writeFileSync(path.join(member, 'package.json'), '{}');
+    const execute = vi.fn<CommandExecutor>().mockResolvedValue({
+      code: 0,
+      stdout: '[]',
+      stderr: '',
+    });
+
+    await new NpmAdapter(execute).install(
+      [{ name: 'is-odd', version: '*' }],
+      { cwd: member, scope: 'project' },
+    );
+
+    expect(execute).toHaveBeenCalledWith(
+      'pnpm',
+      ['add', 'is-odd'],
+      expect.objectContaining({ cwd: member }),
+    );
+  });
+
+  it('snapshots pnpm development and optional dependencies', async () => {
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
+      packageManager: 'pnpm@10.20.0',
+    }));
+    const execute = vi.fn<CommandExecutor>().mockResolvedValue({
+      code: 0,
+      stdout: JSON.stringify([{
+        devDependencies: { typescript: { version: '5.9.2' } },
+        optionalDependencies: { fsevents: { version: '2.3.3' } },
+      }]),
+      stderr: '',
+    });
+
+    const lock = await new NpmAdapter(execute).snapshot(dir, [
+      { name: 'typescript', version: '^5.9.0' },
+      { name: 'fsevents', version: '^2.3.0' },
+    ]);
+
+    expect(lock).toEqual([
+      { name: 'typescript', version: '5.9.2', source: 'npm' },
+      { name: 'fsevents', version: '2.3.3', source: 'npm' },
+    ]);
+  });
+
   it('keeps global installs on npm in a pnpm project', async () => {
     fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
       packageManager: 'pnpm@10.20.0',

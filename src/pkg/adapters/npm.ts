@@ -23,6 +23,8 @@ interface NpmPackageLock {
 
 interface NpmListOutput {
   dependencies?: Record<string, LockPackage>;
+  devDependencies?: Record<string, LockPackage>;
+  optionalDependencies?: Record<string, LockPackage>;
 }
 
 interface PackageJson {
@@ -31,19 +33,37 @@ interface PackageJson {
 
 type LocalPackageManager = 'npm' | 'pnpm';
 
-async function detectLocalPackageManager(cwd: string): Promise<LocalPackageManager> {
+interface LocalPackageManagerInfo {
+  name: LocalPackageManager;
+  workspaceRoot: boolean;
+}
+
+async function detectLocalPackageManager(cwd: string): Promise<LocalPackageManagerInfo> {
   const packageJson = await readJson<PackageJson>(path.join(cwd, 'package.json'));
   const declared = packageJson?.packageManager?.split('@', 1)[0];
-  if (declared === 'npm' || declared === 'pnpm') return declared;
+  if (declared === 'npm') return { name: 'npm', workspaceRoot: false };
 
-  if (
-    await pathExists(path.join(cwd, 'pnpm-lock.yaml'))
-    || await pathExists(path.join(cwd, 'pnpm-workspace.yaml'))
-    || await pathExists(path.join(cwd, 'node_modules', '.pnpm'))
-  ) {
-    return 'pnpm';
+  let current = path.resolve(cwd);
+  while (true) {
+    const workspaceRoot = await pathExists(path.join(current, 'pnpm-workspace.yaml'));
+    const currentPackageJson = current === path.resolve(cwd)
+      ? packageJson
+      : await readJson<PackageJson>(path.join(current, 'package.json'));
+    const currentDeclared = currentPackageJson?.packageManager?.split('@', 1)[0];
+    if (
+      currentDeclared === 'pnpm'
+      || workspaceRoot
+      || await pathExists(path.join(current, 'pnpm-lock.yaml'))
+      || await pathExists(path.join(current, 'node_modules', '.pnpm'))
+    ) {
+      return { name: 'pnpm', workspaceRoot: current === path.resolve(cwd) && workspaceRoot };
+    }
+
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
   }
-  return 'npm';
+  return { name: declared === 'pnpm' ? 'pnpm' : 'npm', workspaceRoot: false };
 }
 
 function satisfiesDeclaredVersion(semver: typeof import('semver'), declared: string, actual: string): boolean {
@@ -92,7 +112,7 @@ export class NpmAdapter extends PackageAdapter<NpmSpec[], NpmLockEntry[]> {
   private async snapshotLocal(cwd: string, declaration: NpmSpec[]): Promise<NpmLockEntry[]> {
     const local = declaration.filter((spec) => !spec.global);
     if (local.length === 0) return [];
-    if (await detectLocalPackageManager(cwd) === 'pnpm') {
+    if ((await detectLocalPackageManager(cwd)).name === 'pnpm') {
       try {
         const result = await this.execute(
           'pnpm',
@@ -101,7 +121,13 @@ export class NpmAdapter extends PackageAdapter<NpmSpec[], NpmLockEntry[]> {
         );
         if (result.code !== 0 || !result.stdout.trim()) return [];
         const [listed] = JSON.parse(result.stdout) as NpmListOutput[];
-        return extractNpmLockEntries({ dependencies: listed?.dependencies }, local);
+        return extractNpmLockEntries({
+          dependencies: {
+            ...listed?.optionalDependencies,
+            ...listed?.devDependencies,
+            ...listed?.dependencies,
+          },
+        }, local);
       } catch {
         return [];
       }
@@ -167,15 +193,16 @@ export class NpmAdapter extends PackageAdapter<NpmSpec[], NpmLockEntry[]> {
 
     const localPackageManager = local.length > 0
       ? await detectLocalPackageManager(context.cwd)
-      : 'npm';
+      : { name: 'npm' as const, workspaceRoot: false };
 
     if (context.dryRun) {
       for (const group of groups.values()) {
         const first = group[0];
-        const command = first.global ? 'npm' : localPackageManager;
+        const command = first.global ? 'npm' : localPackageManager.name;
         const args = [
           command === 'pnpm' ? 'add' : 'install',
           ...(first.global ? ['--global'] : []),
+          ...(command === 'pnpm' && localPackageManager.workspaceRoot ? ['--workspace-root'] : []),
           ...group.map(packageArgument),
           ...(first.registry ? ['--registry', first.registry] : []),
         ];
@@ -186,10 +213,11 @@ export class NpmAdapter extends PackageAdapter<NpmSpec[], NpmLockEntry[]> {
 
     for (const group of groups.values()) {
       const first = group[0];
-      const command = first.global ? 'npm' : localPackageManager;
+      const command = first.global ? 'npm' : localPackageManager.name;
       const args = [
         command === 'pnpm' ? 'add' : 'install',
         ...(first.global ? ['--global'] : []),
+        ...(command === 'pnpm' && localPackageManager.workspaceRoot ? ['--workspace-root'] : []),
         ...group.map(packageArgument),
         ...(first.registry ? ['--registry', first.registry] : []),
       ];
